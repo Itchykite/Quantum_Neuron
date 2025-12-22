@@ -12,16 +12,16 @@ Quantum Neuron & Quantum Layer – Formulas
    y = |ψ|^2
    i.e., the output is the squared magnitude of the complex amplitude
 
-3. Gradient of the weight (real part approximation):
-   ∂|ψ|^2 / ∂w_i ≈ 2 * Re(ψ* * x_i)
-   where ψ* is the complex conjugate of ψ
+3. Gradient (Wirtinger calculus):
+   ∂|ψ|² / ∂w_i* = ψ · conj(x_i)
+   ∂|ψ|² / ∂bias* = ψ
 
 4. Gradient of the bias:
    ∂|ψ|^2 / ∂bias ≈ 2 * Re(ψ)
 
 5. Weight and bias update:
-   w_i ← w_i + lr * 2 * error * Re(ψ* * x_i)
-   bias ← bias + lr * 2 * error * Re(ψ)
+   w_i <- w_i − lr * (out - target) * psi * conj(x_i)
+   b   <- b   − lr * (out - target) * psi
    where error = target - y, lr = learning rate
 
 6. Quantum layer output:
@@ -29,7 +29,7 @@ Quantum Neuron & Quantum Layer – Formulas
    i.e., the sum of outputs of all neurons in the layer
 
 7. Input normalization (optional):
-   x_i ← x_i / sqrt(Σ |x_i|^2)
+   x_i <- x_i / sqrt(Σ |x_i|^2)
    to keep amplitudes in [0,1] and stabilize training
 
 Notes:
@@ -67,23 +67,6 @@ public:
         return std::norm(psi); 
     }
 
-    void train(const std::vector<std::complex<double>>& x, double target, double lr) 
-    {
-        std::complex<double> psi = bias;
-        for (size_t i = 0; i < x.size(); ++i)
-            psi += weights[i] * x[i];
-
-        double out = std::norm(psi);
-        double error = out - target;
-
-        // w_i <- w_i − lr * (out - target) * psi * conj(x_i)
-        // b   <- b   − lr * (out - target) * psi
-        for (size_t i = 0; i < weights.size(); ++i)
-            weights[i] -= lr * error * psi * std::conj(x[i]);
-
-        bias -= lr * error * psi;
-    }
-
     void train_with_layer_error(const std::vector<std::complex<double>>& x, double layer_error, double lr)
     {
         std::complex<double> psi = bias;
@@ -101,11 +84,42 @@ private:
     std::complex<double> bias;
 };
 
+// ---------------------- Zero Quantum Neuron ----------------------
+class ZeroQuantumNeuron 
+{
+public:
+    ZeroQuantumNeuron(double target) : target(target) 
+    {
+        bias = std::sqrt(target);
+    }
+
+    double output(const std::vector<std::complex<double>>& x) 
+    {
+        if (std::abs(x[0]) < 1e-8)
+            return bias * bias;
+        else
+            return 0.0;
+    }
+    
+    void train(const std::vector<std::complex<double>>& x, double lr) 
+    {
+        if (std::abs(x[0]) < 1e-8) 
+        {
+            double error = (bias * bias) - target;
+            bias -= lr * 2.0 * error;
+        }
+    }
+
+private:
+    double target;
+    double bias;
+};
+
 // ---------------------- Quantum Layer ----------------------
 class QuantumLayer 
 {
 public:
-    QuantumLayer(int num_neurons, int input_size, std::mt19937& rng) 
+    QuantumLayer(int num_neurons, int input_size, std::mt19937& rng, double zero_target) : zero_neuron(zero_target) 
     {
         for (int i = 0; i < num_neurons; ++i)
             neurons.emplace_back(input_size, rng);
@@ -114,6 +128,7 @@ public:
     double output(const std::vector<std::complex<double>>& x) 
     {
         double sum = 0.0;
+        sum += zero_neuron.output(x);
         for (auto& neuron : neurons)
             sum += neuron.output(x);
 
@@ -122,6 +137,7 @@ public:
 
     void train(const std::vector<std::complex<double>>& x, double target, double lr) 
     {
+        zero_neuron.train(x, lr);
         double layer_out = output(x);
         double layer_error = layer_out - target; 
         for (auto& neuron : neurons)
@@ -130,6 +146,7 @@ public:
 
 private:
     std::vector<QuantumNeuron> neurons;
+    ZeroQuantumNeuron zero_neuron;
 };
 
 // ---------------------- Main ----------------------
@@ -139,19 +156,20 @@ int main()
     std::mt19937 rng(rd());
 
     int input_size = 1;
-    int num_neurons = 5; 
-    QuantumLayer qlayer(num_neurons, input_size, rng);
+    int num_neurons = 10; 
+    double zero_target = 5.0;
+    QuantumLayer qlayer(num_neurons, input_size, rng, zero_target);
 
     double lr = 0.001;
 
-    for (int epoch = 0; epoch < 2000; ++epoch) 
+    for (int epoch = 0; epoch < 10000; ++epoch) 
     {
         double loss = 0.0;
 
         for (double x = -1.0; x <= 1.0; x += 0.1) 
         {
             std::vector<std::complex<double>> input = { {x, 0.0} };
-            double target = x * x;
+            double target = x * x + zero_target;
 
             double out = qlayer.output(input);
             double err = out - target;
@@ -164,13 +182,18 @@ int main()
             std::cout << "Epoch " << epoch << ", Loss: " << loss << std::endl;
     }
 
-    // Test
+    std::cout << "\nTesting after training:\n";
     for (double x = -1.0; x <= 1.0; x += 0.2) 
     {
-        std::vector<std::complex<double>> input = { {x, 0.0} };
+        std::vector<std::complex<double>> input = { {x,0.0} };
         std::cout << "x=" << x << " | predicted=" << qlayer.output(input)
-                  << " | actual=" << x*x << std::endl;
+                  << " | actual=" << x*x+zero_target << std::endl;
     }
+
+    // Test zero input
+    std::vector<std::complex<double>> zero_input = { {0.0,0.0} };
+    std::cout << "x=0 | predicted=" << qlayer.output(zero_input) 
+              << " | target=5" << std::endl;
 
     return 0;
 }
