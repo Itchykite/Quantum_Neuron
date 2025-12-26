@@ -43,6 +43,8 @@ Notes:
 #include <random>
 #include <cmath>
 
+#include "external/exprtk/exprtk.hpp"
+
 // ---------------------- Quantum Neuron ----------------------
 class QuantumNeuron 
 {
@@ -50,7 +52,7 @@ public:
     QuantumNeuron(int input_size, std::mt19937& rng) 
     {
         weights.resize(input_size);
-        std::uniform_real_distribution<double> dist(-1.0, 1.0);
+        std::uniform_real_distribution<double> dist(-.5, .5);
 
         for (auto& w : weights)
             w = std::complex<double>(dist(rng), dist(rng));
@@ -88,38 +90,31 @@ private:
 class ZeroQuantumNeuron 
 {
 public:
-    ZeroQuantumNeuron(double target) : target(target) 
-    {
-        bias = std::sqrt(target);
-    }
+    ZeroQuantumNeuron(exprtk::expression<double>& expr_ref, double& x_var_ref)
+        : expression(expr_ref), x_var(x_var_ref), bias(0.0) 
+    {}
 
-    double output(const std::vector<std::complex<double>>& x) 
+    double output(const std::vector<std:: complex<double>>& x) 
     {
-        if (std::abs(x[0]) < 1e-8)
-            return bias * bias;
+        if (std:: abs(x[0]) < 1e-5)
+        {
+            x_var = 0.0;
+            return expression.value();
+        }
         else
             return 0.0;
     }
-    
-    void train(const std::vector<std::complex<double>>& x, double lr) 
-    {
-        if (std::abs(x[0]) < 1e-8) 
-        {
-            double error = (bias * bias) - target;
-            bias -= lr * 2.0 * error;
-        }
-    }
 
 private:
-    double target;
+    exprtk::expression<double>& expression;
+    double& x_var;
     double bias;
 };
-
 // ---------------------- Quantum Layer ----------------------
 class QuantumLayer 
 {
 public:
-    QuantumLayer(int num_neurons, int input_size, std::mt19937& rng, double zero_target) : zero_neuron(zero_target) 
+    QuantumLayer(int num_neurons, int input_size, std::mt19937& rng, exprtk::expression<double>& expr, double& x_var) : zero_neuron(expr, x_var) 
     {
         for (int i = 0; i < num_neurons; ++i)
             neurons.emplace_back(input_size, rng);
@@ -137,9 +132,15 @@ public:
 
     void train(const std::vector<std::complex<double>>& x, double target, double lr) 
     {
-        zero_neuron.train(x, lr);
-        double layer_out = output(x);
-        double layer_error = layer_out - target; 
+        double zero_contribution = zero_neuron.output(x);
+        double adjusted_target = target - zero_contribution;
+
+        double regular_output = 0.0;
+        for (auto& neuron : neurons)
+            regular_output += neuron.output(x);
+
+        double layer_error = regular_output - adjusted_target;
+
         for (auto& neuron : neurons)
             neuron.train_with_layer_error(x, layer_error, lr);
     }
@@ -150,26 +151,57 @@ private:
 };
 
 // ---------------------- Main ----------------------
-int main() 
+int main(int argc, char* argv[]) 
 {
+    if (argc < 2)
+    {
+        std::cout << "Usage: " << argv[0] << " '<expression>'\n";
+        std::cout << "Example: " << argv[0] << " 'x^2 + 5'\n";
+        return 1;
+    }
+
+    std::string expr_str = argv[1];
+
+    typedef exprtk::symbol_table<double> symbol_table_t;
+    typedef exprtk::expression<double> expression_t;
+    typedef exprtk::parser<double> parser_t;
+
+    double x_var;
+    symbol_table_t symbol_table;
+    symbol_table.add_variable("x", x_var);
+    symbol_table.add_constants();
+
+    expression_t expression;
+    expression.register_symbol_table(symbol_table);
+
+    parser_t parser;
+    if (!parser.compile(expr_str, expression))
+    {
+        std::cout << "Error: " << parser.error() << "\n";
+        return 1;
+    }
+
     std::random_device rd;
     std::mt19937 rng(rd());
 
     int input_size = 1;
-    int num_neurons = 10; 
-    double zero_target = 5.0;
-    QuantumLayer qlayer(num_neurons, input_size, rng, zero_target);
+    int num_neurons = 50; 
 
+    QuantumLayer qlayer(num_neurons, input_size, rng, expression, x_var);
     double lr = 0.001;
 
-    for (int epoch = 0; epoch < 10000; ++epoch) 
+    for (int epoch = 0; epoch < 100000; ++epoch) 
     {
         double loss = 0.0;
 
-        for (double x = -1.0; x <= 1.0; x += 0.1) 
+        for (int i = -10; i <= 10; ++i)
         {
+            double x = (i == 0) ? 0.0 : i * 0.1;  
+
+            x_var = x;
+            double target = expression.value();
+
             std::vector<std::complex<double>> input = { {x, 0.0} };
-            double target = x * x + zero_target;
 
             double out = qlayer.output(input);
             double err = out - target;
@@ -178,22 +210,25 @@ int main()
             qlayer.train(input, target, lr);
         }
 
-        if (epoch % 200 == 0)
+        if (epoch % 10000 == 0)
             std::cout << "Epoch " << epoch << ", Loss: " << loss << std::endl;
     }
 
     std::cout << "\nTesting after training:\n";
-    for (double x = -1.0; x <= 1.0; x += 0.2) 
+    for (int i = -5; i <= 5; ++i) 
     {
-        std::vector<std::complex<double>> input = { {x,0.0} };
-        std::cout << "x=" << x << " | predicted=" << qlayer.output(input)
-                  << " | actual=" << x*x+zero_target << std::endl;
-    }
+        double x = (i == 0) ? 0.0 : i * 0.2;
 
-    // Test zero input
-    std::vector<std::complex<double>> zero_input = { {0.0,0.0} };
-    std::cout << "x=0 | predicted=" << qlayer.output(zero_input) 
-              << " | target=5" << std::endl;
+        std::vector<std::complex<double>> input = { {x, 0.0} };
+
+        x_var = x;
+        double actual = expression.value();
+
+        std::cout << "x=" << x
+                  << " | predicted=" << qlayer.output(input)
+                  << " | actual=" << actual
+                  << std::endl;
+    }
 
     return 0;
 }
